@@ -2,19 +2,20 @@ package semesterTimeTable.excel;
 
 import java.awt.Color;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.GregorianCalendar;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -22,17 +23,15 @@ import java.util.stream.Collectors;
 
 import org.apache.poi.ss.usermodel.BorderStyle;
 import org.apache.poi.ss.usermodel.FillPatternType;
+import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.usermodel.VerticalAlignment;
 import org.apache.poi.ss.util.CellAddress;
 import org.apache.poi.ss.util.CellRangeAddress;
-import org.apache.poi.xssf.usermodel.DefaultIndexedColorMap;
 import org.apache.poi.xssf.usermodel.XSSFCell;
 import org.apache.poi.xssf.usermodel.XSSFCellStyle;
-import org.apache.poi.xssf.usermodel.XSSFColor;
 import org.apache.poi.xssf.usermodel.XSSFFont;
 import org.apache.poi.xssf.usermodel.XSSFFormulaEvaluator;
 import org.apache.poi.xssf.usermodel.XSSFRichTextString;
-import org.apache.poi.xssf.usermodel.XSSFRow;
 import org.apache.poi.xssf.usermodel.XSSFSheet;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 
@@ -58,11 +57,14 @@ public class LectureWorkbook {
 	/** String representing a line break inside a workbook cell */
 	public final static String LINE_BREAK = "\n";
 
+	/** Error Output for printing errors */
+	private ErrorOutput errorOutput;
+
 	/**
 	 * Object containing style (especially color) configurations from a workbook for
 	 * the lectures
 	 */
-	private ColorWorkbook colorWorkbook;
+	private ConfigWorkbook configWorkbook;
 
 	/** Workbook for the lectures */
 	private XSSFWorkbook workbook;
@@ -91,11 +93,6 @@ public class LectureWorkbook {
 	 * blocks. For more details see {@link #setBorderLists()}
 	 */
 	private List<List<Integer>> borderColumns;
-	/**
-	 * Lists of rows for different types of top borders in the exam week. For more
-	 * details see {@link #setBorderLists()}
-	 */
-	private List<List<Integer>> borderRowsExamWeek;
 	/**
 	 * Lists of rows for different types of top borders. For more details see
 	 * {@link #setBorderLists()}
@@ -137,56 +134,67 @@ public class LectureWorkbook {
 	 * colorMap.xlsx in the directory of the file, it will be loaded as custom
 	 * colorWorkbook.
 	 * 
-	 * @param filename         The path to the workbook file
-	 * @param quarterStartDate The first included date in a quarter (should always
-	 *                         be Monday)
-	 * @param quarterEndDate   The last excluded date in a quarter (should always be
-	 *                         Saturday)
-	 * @param lectures         A list of lectures to be added to the workbook
+	 * @param filename The path to the workbook file
 	 * @throws IOException If reading one workbook file failed
 	 */
-	public LectureWorkbook(String filename, Calendar quarterStartDate, Calendar quarterEndDate, List<Lecture> lectures)
-			throws IOException {
-		this.quarterStartDate = quarterStartDate;
-		this.quarterEndDate = quarterEndDate;
+	public LectureWorkbook(String filename) throws IOException {
+		this.errorOutput = new ErrorOutput();
 		File file = new File(filename);
+		this.setConfigWorkbook(new ConfigWorkbook(file.getParent()));
 		if (file.exists()) {
-			this.setWorkbook(LectureWorkbook.loadWorkbookFromFile(file));
+			this.setWorkbook(ApachePOIWrapper.loadWorkbookFromFile(file));
 		} else {
-			this.setWorkbook(LectureWorkbook
-					.loadWorkbookFromFile(LectureWorkbook.getTemplateFile(LectureWorkbook.TEMPLATE_FILENAME)));
+			this.setWorkbook(ApachePOIWrapper.loadWorkbookFromInputStream(
+					LectureWorkbook.getTemplateInputStream(LectureWorkbook.TEMPLATE_FILENAME)));
 		}
 		this.setBorderLists();
 		this.createBorderStyles();
-		this.setGroupedLectures(lectures);
-		this.setColorWorkbook(new ColorWorkbook(file.getParent(), this.getLectures()));
-		this.resetWorkbook();
-	}
-
-	/**
-	 * Converts an array of Colors into an array of XSSFColors.
-	 * 
-	 * @param colors The colors to be converted
-	 * @return The array of XSSFColors
-	 */
-	public static XSSFColor[] colorsToXSSFColors(Color[] colors) {
-		XSSFColor[] xssfColors = new XSSFColor[colors.length];
-		int index = 0;
-		for (Color color : colors) {
-			xssfColors[index] = colorToXSSFColor(color);
-			index++;
+		Calendar quarterStartDate = this.getConfigWorkbook().getQuarterStartDate();
+		if (quarterStartDate != null) {
+			this.setBorderDatesWithDateInFirstWeek(quarterStartDate);
 		}
-		return xssfColors;
 	}
 
 	/**
-	 * Converts a Color into a XSSFColor.
+	 * Loads the workbook of the given filename, if the file exists. If not a
+	 * workbook template will be loaded. Insert the given lectures into the workbook
+	 * by using the styles of the colorWorkbook. If there is an excel file called
+	 * colorMap.xlsx in the directory of the file, it will be loaded as custom
+	 * colorWorkbook.
 	 * 
-	 * @param color The color to be converted
-	 * @return The XSSFColor
+	 * @param filename    The path to the workbook file
+	 * @param errorOutput The object for error outputs
+	 * @throws IOException If reading one workbook file failed
 	 */
-	public static XSSFColor colorToXSSFColor(Color color) {
-		return new XSSFColor(color, new DefaultIndexedColorMap());
+	public LectureWorkbook(String filename, Output output) throws IOException {
+		this.errorOutput = new ErrorOutput(output);
+		File file = new File(filename);
+		this.setConfigWorkbook(new ConfigWorkbook(file.getParent()));
+		if (file.exists()) {
+			this.setWorkbook(ApachePOIWrapper.loadWorkbookFromFile(file));
+		} else {
+			this.setWorkbook(ApachePOIWrapper.loadWorkbookFromInputStream(
+					LectureWorkbook.getTemplateInputStream(LectureWorkbook.TEMPLATE_FILENAME)));
+		}
+		this.setBorderLists();
+		this.createBorderStyles();
+		Calendar quarterStartDate = this.getConfigWorkbook().getQuarterStartDate();
+		if (quarterStartDate != null) {
+			this.setBorderDatesWithDateInFirstWeek(quarterStartDate);
+		}
+	}
+
+	/**
+	 * Returns the error output object.
+	 * 
+	 * You can use the error output as a kind of error logging object. If for
+	 * example a lecture cannot be added to the excel workbook, the error message
+	 * will be added to the error output.
+	 * 
+	 * @return The error output object
+	 */
+	public ErrorOutput getErrorOutput() {
+		return this.errorOutput;
 	}
 
 	/**
@@ -194,8 +202,8 @@ public class LectureWorkbook {
 	 * 
 	 * @return The color workbook
 	 */
-	public ColorWorkbook getColorWorkbook() {
-		return this.colorWorkbook;
+	public ConfigWorkbook getConfigWorkbook() {
+		return this.configWorkbook;
 	}
 
 	/**
@@ -203,17 +211,8 @@ public class LectureWorkbook {
 	 * 
 	 * @param colorWorkbook The workbook with the color styles
 	 */
-	private void setColorWorkbook(ColorWorkbook colorWorkbook) {
-		this.colorWorkbook = colorWorkbook;
-	}
-
-	/**
-	 * Returns the first (and usually only) sheet of the lecture workbook.
-	 * 
-	 * @return The first sheet of the workbook
-	 */
-	public XSSFSheet getSheet() {
-		return this.getWorkbook().getSheetAt(0);
+	private void setConfigWorkbook(ConfigWorkbook colorWorkbook) {
+		this.configWorkbook = colorWorkbook;
 	}
 
 	/**
@@ -239,17 +238,32 @@ public class LectureWorkbook {
 	 * Deletes all lectures in the workbook and insert the lectures from
 	 * groupedLectures into the workbook.
 	 */
-	public void resetWorkbook() {
-		XSSFSheet sheet = this.workbook.getSheetAt(0);
-		List<CellRangeAddress> ranges = sheet.getMergedRegions();
-		for (int index = sheet.getNumMergedRegions() - 1; index > -1; index--) {
-			CellRangeAddress range = ranges.get(index);
-			if (this.isLectureCell(range.getFirstRow(), range.getFirstColumn())) {
-				sheet.removeMergedRegion(index);
-			}
-		}
-
+	public void fillWorkbook() {
+		XSSFSheet sheet = ApachePOIWrapper.getSheet(this.getWorkbook());
 		this.resetLectureAreaInWorkbook();
+
+		ConfigWorkbook configWorkbook = this.getConfigWorkbook();
+		int firstColumn = 22 - configWorkbook.getExamWeekLength();
+		if (firstColumn < 22) {
+			sheet.addMergedRegion(new CellRangeAddress(139, 146, firstColumn, 21));
+			XSSFCell cell = sheet.getRow(139).getCell(firstColumn);
+			XSSFWorkbook workbook = this.getWorkbook();
+
+			XSSFCellStyle cellStyle = workbook.createCellStyle();
+			cellStyle.setFillForegroundColor(configWorkbook.getExamWeekFillColor());
+			cellStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+			cellStyle.setWrapText(true);
+			cellStyle.setVerticalAlignment(VerticalAlignment.CENTER);
+			cellStyle.setAlignment(HorizontalAlignment.CENTER);
+
+			XSSFFont font = workbook.createFont();
+			XSSFFont examWeekFont = configWorkbook.getExamWeekFont();
+			ApachePOIWrapper.copyFont(font, examWeekFont);
+			cellStyle.setFont(font);
+
+			cell.setCellStyle(cellStyle);
+			cell.setCellValue(configWorkbook.getExamWeekText());
+		}
 
 		this.addLecturesToWorkbook();
 
@@ -266,9 +280,8 @@ public class LectureWorkbook {
 	 * @return true if cell is part of the lecture area, false otherwise
 	 */
 	private boolean isLectureCell(int rowNum, int columnNum) {
-		return (((rowNum > 2 && rowNum < 49) || (rowNum > 51 && rowNum < 98) || (rowNum > 100 && rowNum < 139))
-				&& (columnNum > 0 && columnNum != 11 && columnNum < 22))
-				|| ((rowNum > 138 && rowNum < 147) && (columnNum > 0 && columnNum != 11 && columnNum < 16));
+		return ((rowNum > 2 && rowNum < 49) || (rowNum > 51 && rowNum < 98) || (rowNum > 100 && rowNum < 147))
+				&& (columnNum > 0 && columnNum != 11 && columnNum < 22);
 	}
 
 	/**
@@ -299,9 +312,8 @@ public class LectureWorkbook {
 	 * </tr>
 	 * </table>
 	 * 
-	 * Each border rows list ({@link #borderRowsExamWeek}, {@link #borderRows})
-	 * contains three lists. Each inner list contains row numbers for different top
-	 * border types.
+	 * Each border rows list ({@link #borderRows}) contains three lists. Each inner
+	 * list contains row numbers for different top border types.
 	 * 
 	 * <table>
 	 * <tr>
@@ -324,44 +336,45 @@ public class LectureWorkbook {
 	 * 
 	 */
 	private void setBorderLists() {
+		int firstExamWeekColumn = 22 - this.getConfigWorkbook().getExamWeekLength();
+
+		List<Integer> leftBorderColumns = Arrays.asList(1, 6, 12, 17);
+		List<Integer> noBorderColumns = Arrays.asList(2, 3, 4, 7, 8, 9, 13, 14, 15, 18, 19, 20);
+		List<Integer> rightBorderColumns = Arrays.asList(5, 10, 16, 21);
+
 		this.borderColumnsLastBlock = new ArrayList<List<Integer>>(3);
 		this.borderColumnsExamWeek = new ArrayList<List<Integer>>(3);
 		this.borderColumns = new ArrayList<List<Integer>>(3);
 
-		this.borderColumnsLastBlock.add(0, Arrays.asList(1, 6, 12));
-		this.borderColumnsExamWeek.add(0, Arrays.asList(17));
-		this.borderColumns.add(0, new ArrayList<Integer>());
-		this.borderColumns.get(0).addAll(this.borderColumnsLastBlock.get(0));
-		this.borderColumns.get(0).addAll(this.borderColumnsExamWeek.get(0));
+		this.borderColumnsLastBlock.add(0, LectureWorkbook.getSubColumnList(leftBorderColumns, 0, firstExamWeekColumn));
+		this.borderColumnsExamWeek.add(0, LectureWorkbook.getSubColumnList(leftBorderColumns, firstExamWeekColumn, 22));
+		this.borderColumns.add(0, leftBorderColumns);
 
-		this.borderColumnsLastBlock.add(1, Arrays.asList(2, 3, 4, 7, 8, 9, 13, 14, 15));
-		this.borderColumnsExamWeek.add(1, Arrays.asList(18, 19, 20));
-		this.borderColumns.add(1, new ArrayList<Integer>());
-		this.borderColumns.get(1).addAll(this.borderColumnsLastBlock.get(1));
-		this.borderColumns.get(1).addAll(this.borderColumnsExamWeek.get(1));
+		this.borderColumnsLastBlock.add(1, LectureWorkbook.getSubColumnList(noBorderColumns, 0, firstExamWeekColumn));
+		this.borderColumnsExamWeek.add(1, LectureWorkbook.getSubColumnList(noBorderColumns, firstExamWeekColumn, 22));
+		this.borderColumns.add(1, noBorderColumns);
 
-		this.borderColumnsLastBlock.add(2, Arrays.asList(5, 10));
-		this.borderColumnsExamWeek.add(2, Arrays.asList(16, 21));
-		this.borderColumns.add(2, new ArrayList<Integer>());
-		this.borderColumns.get(2).addAll(this.borderColumnsLastBlock.get(2));
-		this.borderColumns.get(2).addAll(this.borderColumnsExamWeek.get(2));
-
-		this.borderRowsExamWeek = new ArrayList<List<Integer>>(3);
-		this.borderRowsExamWeek.add(0,
-				Arrays.asList(5, 6, 8, 9, 12, 13, 15, 16, 19, 20, 22, 23, 25, 26, 27, 29, 30, 32, 33, 36, 37, 39, 40));
-		this.borderRowsExamWeek.add(1, Arrays.asList(4, 7, 10, 11, 14, 17, 18, 21, 31, 34, 35, 38));
-		this.borderRowsExamWeek.add(2, Arrays.asList(3, 24, 28));
+		this.borderColumnsLastBlock.add(2,
+				LectureWorkbook.getSubColumnList(rightBorderColumns, 0, firstExamWeekColumn));
+		this.borderColumnsExamWeek.add(2,
+				LectureWorkbook.getSubColumnList(rightBorderColumns, firstExamWeekColumn, 22));
+		this.borderColumns.add(2, rightBorderColumns);
 
 		this.borderRows = new ArrayList<List<Integer>>(3);
-		this.borderRows.add(0, new ArrayList<Integer>());
-		this.borderRows.add(1, new ArrayList<Integer>());
-		this.borderRows.add(2, new ArrayList<Integer>());
+		this.borderRows.add(0, Arrays.asList(5, 6, 8, 9, 12, 13, 15, 16, 19, 20, 22, 23, 25, 26, 27, 29, 30, 32, 33, 36,
+				37, 39, 40, 43, 44, 46, 47));
+		this.borderRows.add(1, Arrays.asList(4, 7, 10, 11, 14, 17, 18, 21, 31, 34, 35, 38, 41, 42, 45, 48));
+		this.borderRows.add(2, Arrays.asList(3, 24, 28));
+	}
 
-		this.borderRows.get(2).addAll(this.borderRowsExamWeek.get(2));
-		this.borderRows.get(1).addAll(this.borderRowsExamWeek.get(1));
-		this.borderRows.get(1).addAll(Arrays.asList(41, 42, 45, 48));
-		this.borderRows.get(0).addAll(this.borderRowsExamWeek.get(0));
-		this.borderRows.get(0).addAll(Arrays.asList(43, 44, 46, 47));
+	private static List<Integer> getSubColumnList(List<Integer> columns, int startColumn, int endColumn) {
+		List<Integer> subColumns = new ArrayList<Integer>();
+		for (int column : columns) {
+			if (column >= startColumn && column < endColumn) {
+				subColumns.add(column);
+			}
+		}
+		return subColumns;
 	}
 
 	/**
@@ -379,7 +392,7 @@ public class LectureWorkbook {
 		this.borderStyle[0][1] = workbook.createCellStyle();
 		this.borderStyle[0][1].setBorderLeft(BorderStyle.THIN);
 		this.borderStyle[0][1].setBorderRight(BorderStyle.THIN);
-		this.borderStyle[0][1].setFillForegroundColor(LectureWorkbook.colorToXSSFColor(Color.WHITE));
+		this.borderStyle[0][1].setFillForegroundColor(ApachePOIWrapper.colorToXSSFColor(Color.WHITE));
 		this.borderStyle[0][1].setFillPattern(FillPatternType.SOLID_FOREGROUND);
 
 		this.borderStyle[0][0] = workbook.createCellStyle();
@@ -404,7 +417,7 @@ public class LectureWorkbook {
 
 		this.borderStyle[1][1] = workbook.createCellStyle();
 		this.borderStyle[1][1].cloneStyleFrom(this.borderStyle[2][1]);
-		this.borderStyle[1][1].setTopBorderColor(colorToXSSFColor(Color.LIGHT_GRAY));
+		this.borderStyle[1][1].setTopBorderColor(ApachePOIWrapper.colorToXSSFColor(Color.LIGHT_GRAY));
 
 		this.borderStyle[1][0] = workbook.createCellStyle();
 		this.borderStyle[1][0].cloneStyleFrom(this.borderStyle[1][1]);
@@ -420,12 +433,13 @@ public class LectureWorkbook {
 				this.borderStyleExamWeek[kindOfRow][kindOfColumn] = workbook.createCellStyle();
 				this.borderStyleExamWeek[kindOfRow][kindOfColumn]
 						.cloneStyleFrom(this.borderStyle[kindOfRow][kindOfColumn]);
-				this.borderStyleExamWeek[kindOfRow][kindOfColumn].setFillForegroundColor(colorToXSSFColor(Color.CYAN));
+				this.borderStyleExamWeek[kindOfRow][kindOfColumn]
+						.setFillForegroundColor(ApachePOIWrapper.colorToXSSFColor(Color.CYAN));
 				this.borderStyleExamWeek[kindOfRow][kindOfColumn].setFillPattern(FillPatternType.SOLID_FOREGROUND);
 			}
 		}
 		for (int kindOfColumn = 0; kindOfColumn < 3; kindOfColumn++) {
-			this.borderStyleExamWeek[1][kindOfColumn].setTopBorderColor(colorToXSSFColor(Color.BLACK));
+			this.borderStyleExamWeek[1][kindOfColumn].setTopBorderColor(ApachePOIWrapper.colorToXSSFColor(Color.BLACK));
 		}
 	}
 
@@ -434,6 +448,14 @@ public class LectureWorkbook {
 	 * the cells blank and adding the correct cellStyle.
 	 */
 	private void resetLectureAreaInWorkbook() {
+		XSSFSheet sheet = ApachePOIWrapper.getSheet(this.getWorkbook());
+		List<CellRangeAddress> ranges = sheet.getMergedRegions();
+		for (int index = sheet.getNumMergedRegions() - 1; index > -1; index--) {
+			CellRangeAddress range = ranges.get(index);
+			if (this.isLectureCell(range.getFirstRow(), range.getFirstColumn())) {
+				sheet.removeMergedRegion(index);
+			}
+		}
 
 		// First two blocks
 		for (int block = 0; block < 2; block++) {
@@ -445,7 +467,8 @@ public class LectureWorkbook {
 					int kindOfColumnIndex = 0;
 					for (List<Integer> kindOfColumn : this.borderColumns) {
 						for (int columnNum : kindOfColumn) {
-							this.resetCell(rowNum, columnNum, this.borderStyle[kindOfRowIndex][kindOfColumnIndex]);
+							ApachePOIWrapper.resetCell(this.getWorkbook(), rowNum, columnNum,
+									this.borderStyle[kindOfRowIndex][kindOfColumnIndex]);
 						}
 						kindOfColumnIndex++;
 					}
@@ -454,51 +477,35 @@ public class LectureWorkbook {
 			}
 		}
 
-		// Last block without exam week
+		// Last block
 		int blockStartRow = 2 * 49;
 		int kindOfRowIndex = 0;
 		for (List<Integer> kindOfRow : this.borderRows) {
 			for (int rawRowNum : kindOfRow) {
 				int rowNum = rawRowNum + blockStartRow;
+
+				// Before Exam week
 				int kindOfColumnIndex = 0;
 				for (List<Integer> kindOfColumn : this.borderColumnsLastBlock) {
 					for (int columnNum : kindOfColumn) {
-						this.resetCell(rowNum, columnNum, this.borderStyle[kindOfRowIndex][kindOfColumnIndex]);
+						ApachePOIWrapper.resetCell(this.getWorkbook(), rowNum, columnNum,
+								this.borderStyle[kindOfRowIndex][kindOfColumnIndex]);
 					}
 					kindOfColumnIndex++;
 				}
-			}
-			kindOfRowIndex++;
-		}
 
-		// Exam week
-		kindOfRowIndex = 0;
-		for (List<Integer> kindOfRow : this.borderRowsExamWeek) {
-			for (int rawRowNum : kindOfRow) {
-				int rowNum = rawRowNum + blockStartRow;
-				int kindOfColumnIndex = 0;
+				// Exam week
+				kindOfColumnIndex = 0;
 				for (List<Integer> kindOfColumn : this.borderColumnsExamWeek) {
 					for (int columnNum : kindOfColumn) {
-						this.resetCell(rowNum, columnNum, this.borderStyleExamWeek[kindOfRowIndex][kindOfColumnIndex]);
+						ApachePOIWrapper.resetCell(this.getWorkbook(), rowNum, columnNum,
+								this.borderStyleExamWeek[kindOfRowIndex][kindOfColumnIndex]);
 					}
 					kindOfColumnIndex++;
 				}
 			}
 			kindOfRowIndex++;
 		}
-	}
-
-	/**
-	 * Resets a cell by setting the cell blank and setting the given cellStyle
-	 * 
-	 * @param rowNum    The (0 based) row number of the cell
-	 * @param columnNum The (0 based) column number of the cell
-	 * @param cellStyle The style for the cell
-	 */
-	private void resetCell(int rowNum, int columnNum, XSSFCellStyle cellStyle) {
-		XSSFCell cell = this.getSheet().getRow(rowNum).getCell(columnNum);
-		cell.setBlank();
-		cell.setCellStyle(cellStyle);
 	}
 
 	/**
@@ -512,7 +519,7 @@ public class LectureWorkbook {
 	}
 
 	/**
-	 * REturns the excluded end date of the quarter. It can cause layout errors in
+	 * Returns the excluded end date of the quarter. It can cause layout errors in
 	 * the workbook, if the day of the date is not a Saturday.
 	 * 
 	 * @return The excluded end date of the quarter
@@ -522,17 +529,46 @@ public class LectureWorkbook {
 	}
 
 	/**
-	 * Sets the start date of the quarter. It can cause layout errors in the
-	 * workbook, if the day of the date is not a Monday.
+	 * Calculates and sets the start and end date of the quarter from the given week
+	 * of year and year.
 	 * 
-	 * @param quarterStartDate The included start date of the quarter
-	 * @param quarterEndDate   The excluded end date of the quarter
+	 * @param weekOfYear The start week of the quarter
+	 * @param year       The year of the quarter
+	 * @param timeZone   The time zone for the start and end date
 	 */
-	public void setQuarterBorderDates(Calendar quarterStartDate, Calendar quarterEndDate) {
-		this.quarterStartDate = quarterStartDate;
-		this.quarterEndDate = quarterEndDate;
+	private void setBorderDates(int weekOfYear, int year, TimeZone timeZone) {
+		this.quarterStartDate = LectureWorkbook.weekOfYearToDate(weekOfYear, Calendar.MONDAY, year, timeZone);
+		this.quarterEndDate = LectureWorkbook.weekOfYearToDate(weekOfYear + 11, Calendar.SATURDAY, year, timeZone);
 		this.addHolidays();
-		this.resetWorkbook();
+	}
+
+	/**
+	 * Calculates and sets the start and end date of the quarter from the given
+	 * date. The date can be any date in the first week of the quarter.
+	 * 
+	 * @param date Any date in the first week of the quarter
+	 */
+	public void setBorderDatesWithDateInFirstWeek(Calendar date) {
+		this.setBorderDates(date.get(Calendar.WEEK_OF_YEAR), date.get(Calendar.YEAR), date.getTimeZone());
+	}
+
+	/**
+	 * Calculates and sets the start and end date of the quarter from the given
+	 * date. The date can be any date in the quarter. The quarter start weeks of the
+	 * configuration file are used to get the first week of the quarter for the
+	 * given date.
+	 * 
+	 * @param date Any date in the quarter
+	 */
+	public void setBorderDatesWithDateInQuarter(Calendar date) {
+		int[] quarterStartWeeks = this.getConfigWorkbook().getQuarterStartWeeks();
+		int week = date.get(Calendar.WEEK_OF_YEAR);
+		for (int quarterStartWeek : quarterStartWeeks) {
+			if (week >= quarterStartWeek && week < quarterStartWeek + 13) {
+				this.setBorderDates(quarterStartWeek, date.get(Calendar.YEAR), date.getTimeZone());
+				break;
+			}
+		}
 	}
 
 	/**
@@ -548,15 +584,10 @@ public class LectureWorkbook {
 	 * Sets the grouped lectures by grouping the given lecture list without. This
 	 * method only sets the grouped lectures and do not change the workbook.
 	 * 
-	 * The workbook data and the grouped lecture data will not be consistent after
-	 * using this method. You can use for this the {@link #setLectures(List)} method
-	 * instead.
-	 * 
-	 * @see #setLectures(List)
-	 * 
 	 * @param lectures A list of lectures
+	 * @throws IOException
 	 */
-	private void setGroupedLectures(List<Lecture> lectures) {
+	public void setLectures(List<Lecture> lectures) throws IOException {
 		this.groupedLectures = new TreeMap<String, List<Lecture>>(
 				lectures.stream().collect(Collectors.groupingBy(Lecture::getName)));
 		this.addHolidays();
@@ -574,25 +605,200 @@ public class LectureWorkbook {
 	}
 
 	/**
-	 * Sets the grouped lectures and add them to the workbook.
-	 * 
-	 * @param lectures A list of lectures
-	 */
-	public void setLectures(List<Lecture> lectures) {
-		this.setGroupedLectures(lectures);
-		this.resetWorkbook();
-	}
-
-	/**
 	 * Saves the workbook as an xlsx file with the given filename.
 	 * 
 	 * @param filename The name for the xlsx file
 	 * @throws IOException If saving the workbook failed
 	 */
 	public void saveToFile(String filename) throws IOException {
+		ConfigWorkbook configWorkbook = this.getConfigWorkbook();
+		if (configWorkbook.isNewConfig()) {
+			configWorkbook.addLectureNames(this.getLectures());
+		}
+		configWorkbook.close();
+		this.fillWorkbook();
 		File file = new File(filename);
 		ApachePOIWrapper.saveWorkbookToFile(this.getWorkbook(), file);
 		this.getWorkbook().close();
+	}
+
+	/**
+	 * Gets the cell ranges for the lectures and map them to the lectures. The cell
+	 * range will be varying for parallel lectures.
+	 * 
+	 * For more details how the cell ranges for parallel lectures will be handled,
+	 * see {@link LectureWorkbook#adjustOverlappingCellRanges(List)}.
+	 * 
+	 * @see LectureWorkbook#adjustOverlappingCellRanges(List)
+	 * @param groupedLectures The map of grouped lectures
+	 * @return A map of grouped lectures mapped to their cell range
+	 */
+	private Map<String, Map<Lecture, CellRangeAddress>> mapCellRangesForParallelLectures(
+			Map<String, List<Lecture>> groupedLectures) {
+
+		Map<String, Map<Lecture, CellRangeAddress>> groupedLecturesCellRangeMap = new TreeMap<String, Map<Lecture, CellRangeAddress>>();
+		Calendar quarterStartDate = this.getQuarterStartDate();
+
+		List<CellRangeAddress> cellRanges = new ArrayList<CellRangeAddress>();
+
+		for (Entry<String, List<Lecture>> lectureListEntry : groupedLectures.entrySet()) {
+			Map<Lecture, CellRangeAddress> lectureCellRangeMap = new HashMap<Lecture, CellRangeAddress>();
+			for (Lecture lecture : lectureListEntry.getValue()) {
+				CellRangeAddress cellRange = LectureWorkbook.getCellRangeFromLecture(quarterStartDate, lecture);
+				if (cellRange != null) {
+					lectureCellRangeMap.put(lecture, cellRange);
+					cellRanges.add(cellRange);
+				} else {
+					this.getErrorOutput().addErrorMessage("Skipped the lecture \"" + lecture.toShortString()
+							+ "\", because the lecture date is not in the visible semester time table.");
+				}
+			}
+			groupedLecturesCellRangeMap.put(lectureListEntry.getKey(), lectureCellRangeMap);
+		}
+
+		LectureWorkbook.adjustCellRanges(cellRanges);
+
+		return groupedLecturesCellRangeMap;
+	}
+
+	/**
+	 * Adjusts overlapping cell ranges in the cell range list.
+	 * 
+	 * If there are two lectures with overlapping start and/or end date, each
+	 * lecture gets generally the half of the total cell range of both lectures. But
+	 * the cell range of each lecture cannot decrease. So if one lecture cell range
+	 * is smaller than the total cell range, the other lecture cell range will
+	 * decrease for the remaining cell range space.
+	 * 
+	 * @param cellRanges The list of cell ranges to adjust
+	 */
+	private static void adjustCellRanges(List<CellRangeAddress> cellRanges) {
+		List<CellRangeAddress> cellRangeList = new ArrayList<>(cellRanges);
+
+		int cellRangeListSize = cellRangeList.size();
+		while (cellRangeListSize > 0) {
+			int lastCellRangeInList = cellRangeListSize - 1;
+			CellRangeAddress cellRange = cellRangeList.get(lastCellRangeInList);
+			cellRangeList.remove(lastCellRangeInList);
+
+			List<CellRangeAddress> overlapCellRanges = new ArrayList<CellRangeAddress>();
+			overlapCellRanges.addAll(LectureWorkbook.getRecursiveOverlapCellRanges(cellRange, cellRangeList));
+
+			if (overlapCellRanges.size() > 0) {
+				overlapCellRanges.add(cellRange);
+				LectureWorkbook.adjustOverlappingCellRanges(overlapCellRanges);
+			}
+
+			cellRangeListSize = cellRangeList.size();
+		}
+	}
+
+	/**
+	 * Returns a list of all cell ranges from the given cell range list, which
+	 * overlaps the given cell range and all overlapping cell ranges.
+	 * 
+	 * @param cellRange     The cell range for checking overlapping cell ranges
+	 * @param cellRangeList The list of possible overlapping cell ranges
+	 * @return A list of all overlapping cell ranges
+	 */
+	private static List<CellRangeAddress> getRecursiveOverlapCellRanges(CellRangeAddress cellRange,
+			List<CellRangeAddress> cellRangeList) {
+		return LectureWorkbook.getRecursiveOverlapCellRanges(cellRange, cellRangeList, cellRangeList.size() - 1);
+	}
+
+	/**
+	 * Returns a list of all cell ranges from the given cell range list, which
+	 * overlaps the given cell range and all overlapping cell ranges.
+	 * 
+	 * @param cellRange          The cell range for checking overlapping cell ranges
+	 * @param cellRangeList      The list of possible overlapping cell ranges
+	 * @param lastCellRangeIndex The index of the last cell range, which should be
+	 *                           checked
+	 * @return A list of all overlapping cell ranges
+	 */
+	private static List<CellRangeAddress> getRecursiveOverlapCellRanges(CellRangeAddress cellRange,
+			List<CellRangeAddress> cellRangeList, int lastCellRangeIndex) {
+
+		List<CellRangeAddress> overlapCellRanges = new ArrayList<CellRangeAddress>();
+
+		lastCellRangeIndex = lastCellRangeIndex < cellRangeList.size() ? lastCellRangeIndex : cellRangeList.size() - 1;
+
+		for (int index = lastCellRangeIndex; index >= 0; index--) {
+			CellRangeAddress otherCellRange = cellRangeList.get(index);
+
+			if (cellRange.intersects(otherCellRange)) {
+				cellRangeList.remove(index);
+				overlapCellRanges.addAll(
+						LectureWorkbook.getRecursiveOverlapCellRanges(otherCellRange, cellRangeList, index - 1));
+				overlapCellRanges.add(otherCellRange);
+			}
+		}
+
+		return overlapCellRanges;
+	}
+
+	/**
+	 * Adjusts overlapping cell ranges in the cell range list.
+	 * 
+	 * This is a helper method for {@link LectureWorkbook#adjustCellRanges(List)}.
+	 * Only use this method if you are sure, that all cell ranges are overlapping,
+	 * otherwise it can cause layout errors.
+	 * 
+	 * @param cellRanges The list of overlapping cell ranges to adjust
+	 */
+	private static void adjustOverlappingCellRanges(List<CellRangeAddress> cellRanges) {
+
+		cellRanges.sort((CellRangeAddress a, CellRangeAddress b) -> a.getLastRow() - b.getLastRow());
+		cellRanges.sort((CellRangeAddress a, CellRangeAddress b) -> a.getFirstRow() - b.getFirstRow());
+
+		while (cellRanges.size() > 0) {
+			CellRangeAddress cellRange = cellRanges.get(0);
+
+			List<CellRangeAddress> overlapCellRanges = LectureWorkbook.getOverlapCellRanges(cellRange, cellRanges);
+			int totalCellRanges = overlapCellRanges.size();
+			if (totalCellRanges > 1) {
+				CellRangeAddress nextCellRange = overlapCellRanges.get(1);
+
+				int minRow = cellRange.getFirstRow();
+				int maxRow = Collections
+						.max(overlapCellRanges,
+								(CellRangeAddress a, CellRangeAddress b) -> a.getLastRow() - b.getLastRow())
+						.getLastRow();
+
+				int totalHeight = maxRow - minRow;
+				int possibleRangeHeight = totalHeight / totalCellRanges;
+				possibleRangeHeight = totalHeight % totalCellRanges > 1 ? possibleRangeHeight + 1 : possibleRangeHeight;
+
+				int rangeHeight = cellRange.getLastRow() - minRow;
+				int newRangeHeight = Math.min(rangeHeight, possibleRangeHeight);
+				int possibleLastRow = minRow + newRangeHeight;
+				int lastRow = Math.max(possibleLastRow, nextCellRange.getFirstRow() - 1);
+				cellRange.setLastRow(lastRow);
+				nextCellRange.setFirstRow(lastRow + 1);
+			}
+			cellRanges.remove(0);
+		}
+	}
+
+	/**
+	 * Returns a list of all cell ranges from the given cell range list, which
+	 * overlaps the given cell range.
+	 * 
+	 * @param cellRange     The cell range for checking overlapping cell ranges
+	 * @param cellRangeList The list of possible overlapping cell ranges
+	 * @return A list of all overlapping cell ranges
+	 */
+	private static List<CellRangeAddress> getOverlapCellRanges(CellRangeAddress cellRange,
+			List<CellRangeAddress> cellRangeList) {
+		List<CellRangeAddress> overlapCellRanges = new ArrayList<CellRangeAddress>();
+
+		for (CellRangeAddress otherCellRange : cellRangeList) {
+			if (cellRange.intersects(otherCellRange)) {
+				overlapCellRanges.add(otherCellRange);
+			}
+		}
+
+		return overlapCellRanges;
 	}
 
 	/**
@@ -600,42 +806,77 @@ public class LectureWorkbook {
 	 * of the workbook sheet.
 	 */
 	private void addLecturesToWorkbook() {
-		Map<String, XSSFColor[]> colorPairs = colorWorkbook.getColorPairs();
-		Map<String, XSSFFont> highlightedFonts = colorWorkbook.getHighlightedFonts();
-		String[] ignorePrefixes = colorWorkbook.getIgnorePrefixes();
+		XSSFWorkbook workbook = this.getWorkbook();
 
-		List<Lecture> groupedLectureList;
-		String groupedLectureName;
+		ConfigWorkbook configWorkbook = this.getConfigWorkbook();
+		Map<String, LectureProperties> lecturePropertiesMap = configWorkbook.getLecturePropertiesMap();
+		Map<String, XSSFFont> highlightedFontsRaw = configWorkbook.getHighlightedFonts();
+		Map<String, XSSFFont> highlightedFonts = new HashMap<String, XSSFFont>();
+		for (Entry<String, XSSFFont> highlightedFontRaw : highlightedFontsRaw.entrySet()) {
+			XSSFFont highlightedFont = workbook.createFont();
+			ApachePOIWrapper.copyFont(highlightedFont, highlightedFontRaw.getValue());
+			highlightedFonts.put(highlightedFontRaw.getKey(), highlightedFont);
+		}
+		String[] ignorePrefixes = configWorkbook.getIgnorePrefixes();
 
-		for (Entry<String, List<Lecture>> groupedLecture : this.getGroupedLectures().entrySet()) {
-			groupedLectureList = groupedLecture.getValue();
-			groupedLectureName = groupedLecture.getKey();
+		Map<String, Map<Lecture, CellRangeAddress>> groupedLecturesCellRangeMap = this
+				.mapCellRangesForParallelLectures(this.getGroupedLectures());
+
+		XSSFFont defaultFont = workbook.createFont();
+		defaultFont.setFontHeight((short) 200);
+		defaultFont.setFontName("Arial");
+
+		XSSFCellStyle defaultCellStyle = workbook.createCellStyle();
+		defaultCellStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+		defaultCellStyle.setWrapText(true);
+		defaultCellStyle.setVerticalAlignment(VerticalAlignment.TOP);
+		defaultCellStyle.setFillForegroundColor(ApachePOIWrapper.colorToXSSFColor(Color.WHITE));
+		defaultCellStyle.setFont(defaultFont);
+
+		for (Entry<String, Map<Lecture, CellRangeAddress>> groupedLecture : groupedLecturesCellRangeMap.entrySet()) {
+			Map<Lecture, CellRangeAddress> lectureCellRangeMap = groupedLecture.getValue();
+			String groupedLectureName = groupedLecture.getKey();
 
 			Map<XSSFFont, Integer[]> lectureNameFonts = LectureWorkbook.getTextHighlights(groupedLectureName,
 					highlightedFonts);
 
 			String rawLectureName = LectureWorkbook.removePrefixFromString(groupedLectureName, ignorePrefixes);
-			XSSFColor[] colorPair = LectureWorkbook.getColorPairFromMap(rawLectureName, colorPairs);
+			LectureProperties lectureProperties = LectureWorkbook.getLecturePropertiesFromMap(rawLectureName,
+					lecturePropertiesMap);
 
-			XSSFColor fontColor = null;
-			XSSFFont mainFont = new XSSFFont();
-			mainFont.setFontHeight((short) 200);
-			mainFont.setFontName("Arial");
+			XSSFFont mainFont = null;
+			XSSFCellStyle cellStyle = null;
 
-			XSSFCellStyle cellStyle = this.getWorkbook().createCellStyle();
-			cellStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
-			cellStyle.setWrapText(true);
-			cellStyle.setVerticalAlignment(VerticalAlignment.TOP);
-			if (colorPair != null) {
-				fontColor = colorPair[0];
-				cellStyle.setFillForegroundColor(colorPair[1]);
+			String shortLectureName = rawLectureName == LectureWorkbook.HOLIDAY ? "" : groupedLectureName;
+			if (lectureProperties != null) {
+				mainFont = workbook.createFont();
+
+				cellStyle = workbook.createCellStyle();
+				cellStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+				cellStyle.setWrapText(true);
+				cellStyle.setVerticalAlignment(VerticalAlignment.TOP);
+
+				XSSFFont lectureFont = lectureProperties.getFont();
+				ApachePOIWrapper.copyFont(mainFont, lectureFont);
+
+				cellStyle.setFillForegroundColor(lectureProperties.getFillColor());
+				cellStyle.setFont(mainFont);
+
+				String subShortLectureName = lectureProperties.getShortLectureName();
+				if (subShortLectureName != "") {
+					shortLectureName = shortLectureName.replace(rawLectureName,
+							lectureProperties.getShortLectureName());
+				}
 			} else {
-				cellStyle.setFillForegroundColor(LectureWorkbook.colorToXSSFColor(Color.WHITE));
+				mainFont = defaultFont;
+				cellStyle = defaultCellStyle;
 			}
-			mainFont.setColor(fontColor);
 
-			for (Lecture lecture : groupedLectureList) {
-				this.addLectureToWorkbook(cellStyle, mainFont, lectureNameFonts, lecture);
+			for (Entry<Lecture, CellRangeAddress> lectureCellRangeEntry : lectureCellRangeMap.entrySet()) {
+				Lecture lecture = lectureCellRangeEntry.getKey();
+				lecture.setShortName(shortLectureName);
+				CellRangeAddress cellRange = lectureCellRangeEntry.getValue();
+				this.addLectureToWorkbook(cellRange, cellStyle, mainFont, lectureNameFonts, lecture);
 			}
 		}
 	}
@@ -647,33 +888,36 @@ public class LectureWorkbook {
 	 * where to add the font in the text. The array contains at index 0 the start
 	 * index (inclusive) and at index 1 the end index (exclusive).
 	 * 
+	 * @param cellRange        The cell range for the lecture
 	 * @param cellStyle        The style for the lecture
 	 * @param mainFont         The main font for the lecture
 	 * @param lectureNameFonts A map for highlighting areas of the lecture text
 	 * @param lecture          The lecture itself
 	 * @return true if inserting the lecture was successful, false otherwise
 	 */
-	private boolean addLectureToWorkbook(XSSFCellStyle cellStyle, XSSFFont mainFont,
+	private boolean addLectureToWorkbook(CellRangeAddress cellRange, XSSFCellStyle cellStyle, XSSFFont mainFont,
 			Map<XSSFFont, Integer[]> lectureNameFonts, Lecture lecture) {
-		boolean mergedSuccessful;
+		boolean mergedSuccessful = false;
 		boolean addedSuccessful = false;
-		CellRangeAddress cellRange = getCellRangeFromLecture(this.getQuarterStartDate(), lecture);
-		XSSFSheet sheet = this.getSheet();
-		try {
-			sheet.addMergedRegion(cellRange);
-			mergedSuccessful = true;
-		} catch (IllegalStateException e) {
-
-			// TODO parallel lecture handling
-			mergedSuccessful = false;
-			System.err.println("skipped lecture: " + lecture.getName() + " at " + lecture.getStartDate() + " - "
-					+ lecture.getEndDate());
+		XSSFSheet sheet = ApachePOIWrapper.getSheet(this.getWorkbook());
+		if (cellRange != null) {
+			try {
+				sheet.addMergedRegion(cellRange);
+				mergedSuccessful = true;
+			} catch (IllegalStateException | IllegalArgumentException e) {
+				this.errorOutput.addErrorMessage("Skipped the lecture \"" + lecture.toShortString()
+						+ "\", because the cell range for the lecture cannot be merged. Maybe there is a problem with overlapping lectures.");
+			}
 		}
 
 		if (mergedSuccessful) {
 			XSSFCell cell = sheet.getRow(cellRange.getFirstRow()).getCell(cellRange.getFirstColumn());
-			cell.setCellValue(lectureToRichText(mainFont, lectureNameFonts, lecture));
+			boolean modifiedCellRange = !cellRange
+					.equals(LectureWorkbook.getCellRangeFromLecture(this.getQuarterStartDate(), lecture));
+			cell.setCellValue(
+					LectureWorkbook.lectureToRichText(mainFont, lectureNameFonts, lecture, modifiedCellRange));
 			cell.setCellStyle(cellStyle);
+			addedSuccessful = true;
 		}
 
 		return addedSuccessful;
@@ -687,158 +931,93 @@ public class LectureWorkbook {
 	 * the next day.
 	 */
 	private void addHolidays() {
-		Calendar quarterIncludedEndDate = (Calendar) this.getQuarterEndDate().clone();
-		quarterIncludedEndDate.add(Calendar.DAY_OF_MONTH, -1);
-		Map<Calendar, String> holidays = Holidays.getHolidays(this.getQuarterStartDate(), quarterIncludedEndDate,
-				new Locale("de", "de", "bw"));
-		List<Lecture> holidaysLecture = new ArrayList<Lecture>();
-		for (Entry<Calendar, String> holiday : holidays.entrySet()) {
-			Calendar startDate = holiday.getKey();
-			startDate.setTimeZone(this.getQuarterStartDate().getTimeZone());
-			Calendar endDate = (Calendar) startDate.clone();
-			startDate.add(Calendar.MILLISECOND, 1);
-			endDate.add(Calendar.DAY_OF_MONTH, 1);
-			Lecture lecture = new Lecture(holiday.getValue(), startDate, endDate, "", "");
-			holidaysLecture.add(lecture);
+		Calendar quarterStartDate = this.getQuarterStartDate();
+		Calendar quarterEndDate = this.getQuarterEndDate();
+		Map<String, List<Lecture>> groupedLectures = this.getGroupedLectures();
+		if (quarterStartDate != null && quarterEndDate != null && groupedLectures != null) {
+			Calendar quarterIncludedEndDate = (Calendar) quarterEndDate.clone();
+			quarterIncludedEndDate.add(Calendar.DAY_OF_MONTH, -1);
+			Map<Calendar, String> holidays = Holidays.getHolidays(quarterStartDate, quarterIncludedEndDate,
+					this.getConfigWorkbook().getHolidayLocale());
+			List<Lecture> holidaysLecture = new ArrayList<Lecture>();
+			for (Entry<Calendar, String> holiday : holidays.entrySet()) {
+				Calendar startDate = holiday.getKey();
+				startDate.setTimeZone(quarterStartDate.getTimeZone());
+				Calendar endDate = (Calendar) startDate.clone();
+				startDate.add(Calendar.MILLISECOND, 1);
+				endDate.add(Calendar.DAY_OF_MONTH, 1);
+				Lecture lecture = new Lecture(holiday.getValue(), startDate, endDate, "", "");
+				holidaysLecture.add(lecture);
+			}
+			groupedLectures.put(LectureWorkbook.HOLIDAY, holidaysLecture);
 		}
-		this.getGroupedLectures().put(LectureWorkbook.HOLIDAY, holidaysLecture);
 	}
 
 	/**
 	 * Converts a lecture to a rich text by adding the main font and highlighting
 	 * fonts.
 	 * 
-	 * @param mainFont         The main font for the lecture
-	 * @param lectureNameFonts A map for highlighting areas of the lecture text
-	 * @param lecture          The lecture itself
+	 * @param mainFont          The main font for the lecture
+	 * @param lectureNameFonts  A map for highlighting areas of the lecture text
+	 * @param lecture           The lecture itself
+	 * @param modifiedCellRange True if the cell range for the lecture has changed
+	 *                          (caused by parallel lectures), otherwise false
 	 * @return The lecture converted to a rich text
 	 */
 	private static XSSFRichTextString lectureToRichText(XSSFFont mainFont, Map<XSSFFont, Integer[]> lectureNameFonts,
-			Lecture lecture) {
-		String text = lecture.getName() + LectureWorkbook.LINE_BREAK
-				+ LectureWorkbook.arrayToString(lecture.getResources()) + LectureWorkbook.LINE_BREAK
-				+ LectureWorkbook.arrayToString(lecture.getLecturers());
-		if (!LectureWorkbook.hasLectureNormalTimeInterval(lecture)) {
+			Lecture lecture, boolean modifiedCellRange) {
+		String shortLectureName = lecture.getShortName();
+		String text = shortLectureName != null && shortLectureName != "" ? shortLectureName : lecture.getName();
+		if (modifiedCellRange || !LectureWorkbook.hasLectureNormalTimeInterval(lecture)) {
 			String startTime = LectureWorkbook.getTime(lecture.getStartDate());
 			String endTime = LectureWorkbook.getTime(lecture.getEndDate());
 			text += LectureWorkbook.LINE_BREAK + startTime + "-" + endTime;
 		}
+		String[] lecturers = lecture.getLecturers();
+		if (lecturers != null) {
+			text += LectureWorkbook.LINE_BREAK + LectureWorkbook.arrayToString(lecturers);
+		}
+		String[] resources = lecture.getResources();
+		if (resources != null) {
+			text += LectureWorkbook.LINE_BREAK + LectureWorkbook.arrayToString(lecture.getResources());
+		}
+		// TODO move following lines to ApachePOIWrapper?
 		XSSFRichTextString richText = new XSSFRichTextString(text);
 		richText.applyFont(mainFont);
+		short mainFontHeight = mainFont.getFontHeight();
+		String mainFontName = mainFont.getFontName();
 		for (Entry<XSSFFont, Integer[]> lectureNameFont : lectureNameFonts.entrySet()) {
 			Integer[] indexes = lectureNameFont.getValue();
-			richText.applyFont(indexes[0], indexes[1], lectureNameFont.getKey());
+			XSSFFont nameFont = lectureNameFont.getKey();
+			nameFont.setFontHeight(mainFontHeight);
+			nameFont.setFontName(mainFontName);
+			richText.applyFont(indexes[0], indexes[1], nameFont);
 		}
 		return richText;
 	}
 
 	/**
-	 * Returns a map of color pairs from a cell range. All cells with a value in the
-	 * cell range will be added to the map with their color pair. A color pair is an
-	 * array with to values. The first value is the font color of the cell and the
-	 * second value is the fill color of the cell.
-	 * 
-	 * @param sheet     The sheet, which will be scanned
-	 * @param cellRange The cell range, which will be scanned
-	 * @return A map of cell values and color array pairs (array always and only
-	 *         contains font color and fill color)
-	 */
-	public static Map<String, XSSFColor[]> getMappedColorPairs(XSSFSheet sheet, CellRangeAddress cellRange) {
-		Map<String, XSSFColor[]> colorMap = new HashMap<String, XSSFColor[]>();
-		for (int rowNum = cellRange.getFirstColumn(); rowNum <= cellRange.getLastRow(); rowNum++) {
-			XSSFRow row = sheet.getRow(rowNum);
-			for (int columnNum = cellRange.getFirstColumn(); columnNum <= cellRange.getLastColumn(); columnNum++) {
-				XSSFCell cell = row.getCell(columnNum);
-				if (cell != null) {
-					String key = cell.getStringCellValue();
-					if (key != null && key != "") {
-						XSSFCellStyle cellStyle = cell.getCellStyle();
-						XSSFColor fillColor = cellStyle.getFillForegroundColorColor();
-						fillColor = fillColor == null ? cellStyle.getFillBackgroundColorColor() : fillColor;
-						XSSFColor[] colorPair = new XSSFColor[] { cellStyle.getFont().getXSSFColor(), fillColor };
-						colorMap.put(key, colorPair);
-					}
-				}
-			}
-		}
-		return colorMap;
-	}
-
-	/**
-	 * Returns a map of font colors from a cell range. All cells with a value in the
-	 * cell range will be added to the map with their font color.
-	 * 
-	 * @param sheet     The sheet, which will be scanned
-	 * @param cellRange The cell range, which will be scanned
-	 * @return A map of cell values and font color pairs
-	 */
-	public static Map<String, XSSFFont> getMappedFontColor(XSSFSheet sheet, CellRangeAddress cellRange) {
-		Map<String, XSSFFont> fontMap = new HashMap<String, XSSFFont>();
-		for (int rowNum = cellRange.getFirstRow(); rowNum <= cellRange.getLastRow(); rowNum++) {
-			XSSFRow row = sheet.getRow(rowNum);
-			for (int columnNum = cellRange.getFirstColumn(); columnNum <= cellRange.getLastColumn(); columnNum++) {
-				XSSFCell cell = row.getCell(columnNum);
-				if (cell != null) {
-					String key = cell.getStringCellValue();
-					if (key != null && key != "") {
-						XSSFFont font = new XSSFFont();
-						font.setFontHeight((short) 200);
-						font.setFontName("Arial");
-						font.setColor(cell.getCellStyle().getFont().getXSSFColor());
-						fontMap.put(key, font);
-					}
-				}
-			}
-
-		}
-		return fontMap;
-	}
-
-	/**
-	 * Returns an array of all values from a cell range. Cells with no value will
-	 * not be added to the array.
-	 * 
-	 * @param sheet     The sheet, which will be scanned
-	 * @param cellRange The cell range, which will be scanned
-	 * @return An array of cell values
-	 */
-	public static String[] getValuesFromWorkbook(XSSFSheet sheet, CellRangeAddress cellRange) {
-		List<String> valueList = new ArrayList<String>();
-		for (int rowNum = cellRange.getFirstRow(); rowNum <= cellRange.getLastRow(); rowNum++) {
-			XSSFRow row = sheet.getRow(rowNum);
-			for (int columnNum = cellRange.getFirstColumn(); columnNum <= cellRange.getLastColumn(); columnNum++) {
-				XSSFCell cell = row.getCell(columnNum);
-				if (cell != null) {
-					String value = cell.getStringCellValue();
-					if (value != null && value != "") {
-						valueList.add(value);
-					}
-				}
-			}
-		}
-		return valueList.toArray(new String[valueList.size()]);
-	}
-
-	/**
 	 * Returns the color array of the given name from the color map. If the name
-	 * does not match a color map key, then null is returned.
+	 * does not match lecture properties key, then null is returned.
 	 *
 	 * The name can contain a '*' as a wildcard.
 	 * 
-	 * @param name     The name for matching a key
-	 * @param colorMap A map of a color array
+	 * @param name                 The name for matching a key
+	 * @param lecturePropertiesMap A map of lecture properties
 	 * @return The color array of the name from the color map, or null if name not
 	 *         matches a color map key
 	 */
-	public static XSSFColor[] getColorPairFromMap(String name, Map<String, XSSFColor[]> colorMap) {
-		XSSFColor[] color = null;
-		for (String key : colorMap.keySet()) {
+	public static LectureProperties getLecturePropertiesFromMap(String name,
+			Map<String, LectureProperties> lecturePropertiesMap) {
+		LectureProperties lectureProperties = null;
+		for (String key : lecturePropertiesMap.keySet()) {
 			String matchKey = "\\Q" + key.replace("*", "\\E.*\\Q") + "\\E";
 			if (name.matches(matchKey)) {
-				color = colorMap.get(key);
+				lectureProperties = lecturePropertiesMap.get(key);
+				break;
 			}
 		}
-		return color;
+		return lectureProperties;
 	}
 
 	/**
@@ -882,6 +1061,7 @@ public class LectureWorkbook {
 			}
 		}
 		return rawString;
+		// TODO move method to helper class
 	}
 
 	/**
@@ -892,10 +1072,12 @@ public class LectureWorkbook {
 	 */
 	private static String arrayToString(String[] array) {
 		String string = "";
-		for (String element : array) {
-			string += "," + element;
+		if (array != null) {
+			for (String element : array) {
+				string += "," + element;
+			}
+			string = string == "" ? "" : string.substring(1);
 		}
-		string = string == "" ? "" : string.substring(1);
 		return string;
 	}
 
@@ -1006,26 +1188,35 @@ public class LectureWorkbook {
 	}
 
 	/**
-	 * Returns the workbook of the given file.
+	 * Converts the given week of the year, day of the week and year to a Date.
 	 * 
-	 * @param file The file of the workbook
-	 * @return The workbook of the given file
-	 * @throws IOException If reading the workbook failed
+	 * @param weekOfYear The week of the year
+	 * @param dayOfWeek  The day of the week
+	 * @param year       The year
+	 * @param timeZone   The time zone
+	 * @return The date created from the given parameters
 	 */
-	public static XSSFWorkbook loadWorkbookFromFile(File file) throws IOException {
-		FileInputStream excelFile = new FileInputStream(file);
-		XSSFWorkbook workbook = new XSSFWorkbook(excelFile);
-		return workbook;
+	public static Calendar weekOfYearToDate(int weekOfYear, int dayOfWeek, int year, TimeZone timeZone) {
+		Calendar calendar = new GregorianCalendar();
+		calendar.set(Calendar.DAY_OF_WEEK, dayOfWeek);
+		calendar.set(Calendar.WEEK_OF_YEAR, weekOfYear);
+		calendar.set(Calendar.YEAR, year);
+		calendar.setTimeZone(timeZone);
+		calendar.set(Calendar.HOUR_OF_DAY, 0);
+		calendar.set(Calendar.MINUTE, 0);
+		calendar.set(Calendar.SECOND, 0);
+		calendar.set(Calendar.MILLISECOND, 0);
+		return calendar;
 	}
 
 	/**
-	 * Returns the template file of a given filename. The template file is stored
-	 * inside the root source folder of this class.
+	 * Returns the input stream of a template file of a given filename. The template
+	 * file is stored inside the root source folder of this class.
 	 * 
 	 * @param filename The filename for a template file
-	 * @return The template file of the filename
+	 * @return The input stream of the filename
 	 */
-	public static File getTemplateFile(String filename) {
-		return new File(LectureWorkbook.class.getClassLoader().getResource(filename).getFile());
+	public static InputStream getTemplateInputStream(String filename) {
+		return LectureWorkbook.class.getClassLoader().getResourceAsStream(filename);
 	}
 }

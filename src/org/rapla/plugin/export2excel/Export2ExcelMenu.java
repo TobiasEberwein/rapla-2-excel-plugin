@@ -24,6 +24,7 @@ import org.rapla.entities.User;
 import org.rapla.entities.domain.AppointmentBlock;
 import org.rapla.facade.CalendarSelectionModel;
 import org.rapla.framework.RaplaContext;
+import org.rapla.framework.RaplaContextException;
 import org.rapla.framework.RaplaException;
 import org.rapla.gui.RaplaGUIComponent;
 import org.rapla.gui.toolkit.DialogUI;
@@ -43,47 +44,36 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 	String id = "export_file_text";
 	JMenuItem item;
 
+	/** Line break character */
 	private static final String LINE_BREAK = "\n";
+
+	/** Cell break character */
 	private static final String CELL_BREAK = ";";
 
+	/** File extension for excel files */
 	private static final String FILE_EXTENSION = "xlsx";
 
-	private String mostCommonClassName;
-
+	/**
+	 * Creates the export menu for the export to excel plugin.
+	 * 
+	 * @param sm The rapla context
+	 */
 	public Export2ExcelMenu(RaplaContext sm) {
 		super(sm);
 		setChildBundleName(Export2ExcelPlugin.RESOURCE_FILE);
 		this.item = new JMenuItem(getString(this.id));
 		this.item.setIcon(getIcon("icon.export"));
 		this.item.addActionListener(this);
-		this.setMostCommonClassName("");
 	}
 
 	/**
 	 * Event handler for clicking on the export to excel menu entry.
 	 * 
-	 * @param evt
+	 * @param evt The action event
 	 */
 	public void actionPerformed(ActionEvent evt) {
 		try {
-			CalendarSelectionModel model = getService(CalendarSelectionModel.class);
-
-			TimeZone timeZone = getRaplaLocale().getTimeZone();
-			Calendar calendar = new GregorianCalendar();
-
-			calendar.setTime(model.getStartDate());
-			calendar.setTimeZone(timeZone);
-
-			int weekOfYear = calendar.get(Calendar.WEEK_OF_YEAR);
-			int year = calendar.get(Calendar.YEAR);
-
-			Date startDate = weekOfYearToDate(getQuarterStartWeekForAWeek(weekOfYear), Calendar.MONDAY, year, timeZone);
-			Date endDate = weekOfYearToDate(getQuarterEndWeekForAWeek(weekOfYear), Calendar.SATURDAY, year, timeZone);
-
-			model.setStartDate(startDate);
-			model.setEndDate(endDate);
-
-			export(model);
+			this.export();
 		} catch (Exception ex) {
 			showException(ex, getMainComponent());
 		}
@@ -92,7 +82,7 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 	/**
 	 * Getter method for the id of the menu.
 	 * 
-	 * @return id
+	 * @return id The id for the menu
 	 */
 	public String getId() {
 		return this.id;
@@ -101,7 +91,7 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 	/**
 	 * Getter method for the menu item.
 	 * 
-	 * @return item
+	 * @return The menu item
 	 */
 	public JMenuItem getMenuElement() {
 		return this.item;
@@ -112,34 +102,39 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 	 * event handler for clicking on the export menu entry.
 	 * 
 	 * @param model The calendar selection model
-	 * @throws Exception
+	 * @throws IOException           If saving or loading a workbook fails
+	 * @throws RaplaException
+	 * @throws RaplaContextException
 	 */
-	public void export(final CalendarSelectionModel model) throws Exception {
-		Collection<? extends RaplaTableColumn<?>> columns;
-		List<Object> objects = new ArrayList<Object>();
-		User user = model.getUser();
-		columns = TableConfig.loadColumns(getContainer(), "appointments",
-				TableViewExtensionPoints.APPOINTMENT_TABLE_COLUMN, user);
-		final List<AppointmentBlock> blocks = model.getBlocks();
-		objects.addAll(blocks);
-
-		List<Lecture> lectures = this.raplaObjectsToLectures(objects, columns);
-
-		TimeZone timeZone = getRaplaLocale().getTimeZone();
-
-		Calendar quarterStartDate = new GregorianCalendar();
-		quarterStartDate.setTime(model.getStartDate());
-		quarterStartDate.setTimeZone(timeZone);
-
-		Calendar quarterEndDate = new GregorianCalendar();
-		quarterEndDate.setTime(model.getEndDate());
-		quarterEndDate.setTimeZone(timeZone);
-
-		String filename = this.getDefaultFileName();
-		String path = loadFile(filename);
+	public void export() throws IOException, RaplaContextException, RaplaException {
+		CalendarSelectionModel preModel = getService(CalendarSelectionModel.class);
+		String mostCommonClassName = this.getMostCommonClassName(preModel);
+		String filename = this.getDefaultFileName(mostCommonClassName);
+		String path = this.loadFile(filename);
 		if (path != null) {
-			saveFile(path, quarterStartDate, quarterEndDate, lectures);
-			exportFinished(getMainComponent());
+			LectureWorkbook lectureWorkbook = new LectureWorkbook(path);
+
+			CalendarSelectionModel model = getService(CalendarSelectionModel.class);
+
+			if (lectureWorkbook.getQuarterStartDate() == null || lectureWorkbook.getQuarterEndDate() == null) {
+				TimeZone timeZone = getRaplaLocale().getTimeZone();
+				Calendar dateInQuarter = new GregorianCalendar();
+				dateInQuarter.setTime(model.getStartDate());
+				dateInQuarter.setTimeZone(timeZone);
+
+				lectureWorkbook.setBorderDatesWithDateInQuarter(dateInQuarter);
+			}
+
+			Date startDate = lectureWorkbook.getQuarterStartDate().getTime();
+			model.setStartDate(startDate);
+			Date endDate = lectureWorkbook.getQuarterEndDate().getTime();
+			model.setEndDate(endDate);
+
+			List<Lecture> lectures = this.getLecturesFromRaplaModel(model);
+
+			lectureWorkbook.setLectures(lectures);
+			lectureWorkbook.saveToFile(path);
+			this.exportFinished(getMainComponent(), lectureWorkbook.getErrorOutput().getErrorOutput());
 		}
 	}
 
@@ -147,11 +142,18 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 	 * Shows dialog window with export finished message.
 	 * 
 	 * @param topLevel
+	 * @param errorLogging The error logging of the export (empty string, if no
+	 *                     errors occurred)
 	 * @return
 	 */
-	protected boolean exportFinished(Component topLevel) {
+	protected boolean exportFinished(Component topLevel, String errorLogging) {
+		if (errorLogging == null) {
+			errorLogging = "";
+		}
 		try {
-			DialogUI dlg = DialogUI.create(getContext(), topLevel, true, getString("export"), getString("file_saved"),
+			errorLogging = errorLogging.replace("\n", "<br>");
+			String dialogText = getString("file_saved") + "<br>" + errorLogging;
+			DialogUI dlg = DialogUI.create(getContext(), topLevel, true, getString("export"), dialogText,
 					new String[] { getString("ok") });
 			dlg.setIcon(getIcon("icon.export"));
 			dlg.setDefault(0);
@@ -161,27 +163,6 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 			return true;
 		}
 
-	}
-
-	/**
-	 * Saves the lectures as a workbook under the given filename. If there exists a
-	 * file with the given filename, it is used as custom template workbook for the
-	 * lectures. Otherwise the standard template workbook is used.
-	 * 
-	 * @param filename         The name for the file
-	 * @param quarterStartDate The included start date of the quarter
-	 * @param quarterEndDate   The excluded end date of the quarter
-	 * @param lectures         a list of lectures
-	 * @throws RaplaException If loading or saving the file fails
-	 */
-	public void saveFile(String filename, Calendar quarterStartDate, Calendar quarterEndDate, List<Lecture> lectures)
-			throws RaplaException {
-		try {
-			LectureWorkbook excelGenerator = new LectureWorkbook(filename, quarterStartDate, quarterEndDate, lectures);
-			excelGenerator.saveToFile(filename);
-		} catch (IOException e) {
-			throw new RaplaException(e.getMessage(), e);
-		}
 	}
 
 	/**
@@ -236,9 +217,8 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 	 * 
 	 * @return The default file name
 	 */
-	private String getDefaultFileName() {
+	private String getDefaultFileName(String className) {
 		String lecturesTitle = getString("lectures_file_name").replace(' ', '_');
-		String className = this.getMostCommonClassName();
 		if (className != null && className != "") {
 			lecturesTitle += "_" + className;
 		}
@@ -247,18 +227,52 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 	}
 
 	/**
-	 * Converts a list of rapla objects into a list of lectures and sets the most
-	 * common class name from the lectures.
+	 * Extracts a collection of rapla table column objects from the given calendar
+	 * selection model.
 	 * 
-	 * @param objects The rapla objects
-	 * @param columns The rapla columns
+	 * @param model The calendar selection model
+	 * @return A collection of rapla table column objects
+	 * @throws RaplaContextException
+	 * @throws RaplaException
+	 */
+	private Collection<? extends RaplaTableColumn<?>> getColumnsFromModel(CalendarSelectionModel model)
+			throws RaplaContextException, RaplaException {
+		Collection<? extends RaplaTableColumn<?>> columns;
+		User user = model.getUser();
+		columns = TableConfig.loadColumns(getContainer(), "appointments",
+				TableViewExtensionPoints.APPOINTMENT_TABLE_COLUMN, user);
+		return columns;
+	}
+
+	/**
+	 * Extracts a list of raw lecture objects from the given calendar selection
+	 * model.
+	 * 
+	 * @param model The calendar selection model
+	 * @return A list of raw lecture objects
+	 * @throws RaplaException
+	 */
+	private List<Object> getObjectsFromModel(CalendarSelectionModel model) throws RaplaException {
+		final List<AppointmentBlock> blocks = model.getBlocks();
+		List<Object> objects = new ArrayList<Object>();
+		objects.addAll(blocks);
+		return objects;
+	}
+
+	/**
+	 * Extracts a list of lectures from the given calendar selection model.
+	 * 
+	 * @param model The calendar selection model
 	 * @return A list of lectures
+	 * @throws RaplaContextException
+	 * @throws RaplaException
 	 */
 	@SuppressWarnings({ "rawtypes", "unchecked" })
-	private List<Lecture> raplaObjectsToLectures(List<Object> objects,
-			Collection<? extends RaplaTableColumn<?>> columns) {
+	private List<Lecture> getLecturesFromRaplaModel(CalendarSelectionModel model)
+			throws RaplaContextException, RaplaException {
+		Collection<? extends RaplaTableColumn<?>> columns = this.getColumnsFromModel(model);
+		List<Object> objects = this.getObjectsFromModel(model);
 
-		Map<String, Integer> classNames = new HashMap<String, Integer>();
 		TimeZone timeZone = getRaplaLocale().getTimeZone();
 		List<Lecture> lectures = new ArrayList<Lecture>();
 		for (Object row : objects) {
@@ -289,15 +303,7 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 						String[] resources = escape(value).split(", ");
 						ArrayList<String> rooms = new ArrayList<String>();
 						for (String resource : resources) {
-							if (resource.endsWith(")")) {
-								resource = resource.replaceAll(" \\(.*\\)", "");
-								int count = 0;
-								if (classNames.containsKey(resource)) {
-									count = classNames.get(resource);
-								}
-								count++;
-								classNames.put(resource, count);
-							} else {
+							if (Export2ExcelMenu.resourceIsRoom(resource)) {
 								rooms.add(resource);
 							}
 						}
@@ -315,78 +321,60 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 			lectures.add(lecture);
 		}
 
-		this.setMostCommonClassName(getHighestCountKey(classNames));
 		return lectures;
 	}
 
 	/**
-	 * Returns the most common class name of the current export.
+	 * Extracts the most common class name from the given calendar selection model.
 	 * 
+	 * The class names are all resources except rooms.
+	 * 
+	 * @param model The calendar selection model
 	 * @return The most common class name
+	 * @throws RaplaContextException
+	 * @throws RaplaException
 	 */
-	private String getMostCommonClassName() {
-		return this.mostCommonClassName;
-	}
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	private String getMostCommonClassName(CalendarSelectionModel model) throws RaplaContextException, RaplaException {
+		Collection<? extends RaplaTableColumn<?>> columns = this.getColumnsFromModel(model);
+		List<Object> objects = this.getObjectsFromModel(model);
 
-	/**
-	 * Sets the most common class name of the current export.
-	 * 
-	 * @param mostCommonClassName The most common class name
-	 */
-	private void setMostCommonClassName(String mostCommonClassName) {
-		this.mostCommonClassName = mostCommonClassName;
-	}
+		Map<String, Integer> classNames = new HashMap<String, Integer>();
 
-	/**
-	 * Converts the given week of the year, day of the week and year to a Date.
-	 * 
-	 * @param weekOfYear The week of the year
-	 * @param dayOfWeek  The day of the week
-	 * @param year       The year
-	 * @param timeZone   The time zone
-	 * @return The date created from the given parameters
-	 */
-	private static Date weekOfYearToDate(int weekOfYear, int dayOfWeek, int year, TimeZone timeZone) {
-		Calendar calendar = new GregorianCalendar();
-		calendar.set(Calendar.DAY_OF_WEEK, dayOfWeek);
-		calendar.set(Calendar.WEEK_OF_YEAR, weekOfYear);
-		calendar.set(Calendar.YEAR, year);
-		calendar.setTimeZone(timeZone);
-		calendar.set(Calendar.HOUR_OF_DAY, 0);
-		calendar.set(Calendar.MINUTE, 0);
-		calendar.set(Calendar.SECOND, 0);
-		calendar.set(Calendar.MILLISECOND, 0);
-		return calendar.getTime();
-	}
+		for (Object row : objects) {
+			for (RaplaTableColumn column : columns) {
+				Object value = column.getValue(row);
+				String columnName = column.getColumnName();
 
-	/**
-	 * Returns the first week of a quarter from a random week in this quarter.
-	 * 
-	 * @param weekOfYear A random week in a quarter
-	 * @return The first week of the quarter
-	 */
-	private static int getQuarterStartWeekForAWeek(int weekOfYear) {
-		int quarter = weekOfYear / 13;
-		if (quarter < 2) {
-			return quarter * 13 + 2;
-		} else {
-			return quarter * 13 + 1;
+				if (columnName == getString("resources") && value != null) {
+					String[] resources = this.escape(value).split(", ");
+					for (String resource : resources) {
+						if (!Export2ExcelMenu.resourceIsRoom(resource)) {
+							resource = resource.replaceAll(" \\(.*\\)", "");
+							int count = 0;
+							if (classNames.containsKey(resource)) {
+								count = classNames.get(resource);
+							}
+							count++;
+							classNames.put(resource, count);
+						}
+					}
+
+				}
+			}
 		}
+		return getHighestCountKey(classNames);
 	}
 
 	/**
-	 * Returns the last week of a quarter from a random week in this quarter.
+	 * Checks if the given resource name matches the regular expression for a room.
+	 * If the name does NOT contains 3 upper case letters followed by two digits.
 	 * 
-	 * @param weekOfYear A random week in a quarter
-	 * @return The last week of the quarter
+	 * @param resourceName The name to check if it is a room name
+	 * @return True if the given name is a room name, otherwise false.
 	 */
-	private static int getQuarterEndWeekForAWeek(int weekOfYear) {
-		int quarter = weekOfYear / 13;
-		if (quarter < 2) {
-			return quarter * 13 + 13;
-		} else {
-			return quarter * 13 + 12;
-		}
+	public static boolean resourceIsRoom(String resourceName) {
+		return !resourceName.matches(".*\\p{Upper}{3}\\d{2}.*");
 	}
 
 	/**
@@ -398,16 +386,10 @@ public class Export2ExcelMenu extends RaplaGUIComponent implements IdentifiableM
 	private static String getHighestCountKey(Map<String, Integer> map) {
 		Entry<String, Integer> highestEntry = null;
 		for (Entry<String, Integer> entry : map.entrySet()) {
-			if (highestEntry == null) {
-				highestEntry = entry;
-			} else if (entry.getValue() > highestEntry.getValue()) {
+			if (highestEntry == null || entry.getValue() > highestEntry.getValue()) {
 				highestEntry = entry;
 			}
 		}
-		if (highestEntry == null) {
-			return null;
-		} else {
-			return highestEntry.getKey();
-		}
+		return highestEntry == null ? null : highestEntry.getKey();
 	}
 }
